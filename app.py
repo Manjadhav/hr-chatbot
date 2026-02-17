@@ -1,7 +1,7 @@
 print("HR CHATBOT SERVER STARTED")
 
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 import sqlite3
 import os
 import uuid
@@ -9,7 +9,7 @@ import uuid
 app = FastAPI()
 
 # ----------------------------
-# Setup
+# SETUP
 # ----------------------------
 os.makedirs("uploads", exist_ok=True)
 
@@ -27,15 +27,16 @@ CREATE TABLE IF NOT EXISTS candidates (
 """)
 conn.commit()
 
+ADMIN_PASSWORD = "admin123"
+
 # ----------------------------
-# HOME PAGE
+# HOME PAGE (CHATBOT)
 # ----------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
     <html>
     <body style="font-family:Arial;background:#ece5dd">
-
     <h2>HR Recruitment Chatbot</h2>
 
     <div id="chatbox" style="
@@ -49,12 +50,10 @@ def home():
     </div>
 
     <br>
-
     <input id="message" type="text" placeholder="Type message" style="width:300px">
     <button onclick="sendMessage()">Send</button>
 
     <br><br>
-
     <h3>Upload CV</h3>
     <input type="file" id="cvfile">
     <button onclick="uploadCV()">Upload CV</button>
@@ -64,14 +63,14 @@ def home():
     let candidate_id = localStorage.getItem("candidate_id");
 
     function addMsg(sender, text){
-        document.getElementById("chatbox").innerHTML +=
-        "<p><b>"+sender+":</b> "+text+"</p>";
+        let box = document.getElementById("chatbox");
+        box.innerHTML += "<p><b>"+sender+":</b> "+text+"</p>";
+        box.scrollTop = box.scrollHeight;
     }
 
     async function sendMessage() {
         let input = document.getElementById("message");
         let message = input.value;
-
         addMsg("You", message);
 
         const response = await fetch("/chat", {
@@ -85,10 +84,8 @@ def home():
         });
 
         const data = await response.json();
-
         stage = data.stage;
         candidate_id = data.candidate_id;
-
         localStorage.setItem("candidate_id", candidate_id);
 
         addMsg("Bot", data.reply);
@@ -96,14 +93,12 @@ def home():
     }
 
     async function uploadCV() {
-
         if (!candidate_id) {
             alert("Complete chat first.");
             return;
         }
 
         let fileInput = document.getElementById("cvfile");
-
         if (fileInput.files.length === 0) {
             alert("Select CV first");
             return;
@@ -122,16 +117,12 @@ def home():
         alert(data.message);
     }
     </script>
-
-    <br><br>
-
-
     </body>
     </html>
     """
 
 # ----------------------------
-# CHAT LOGIC (DB BASED)
+# CHAT LOGIC
 # ----------------------------
 from pydantic import BaseModel
 
@@ -142,70 +133,51 @@ class ChatData(BaseModel):
 
 @app.post("/chat")
 async def chat(data: ChatData):
-
     stage = data.stage
     candidate_id = data.candidate_id
 
-    # First interaction → create empty candidate
     if stage == 0:
-        cursor.execute("INSERT INTO candidates (name, email, experience) VALUES (?, ?, ?)",
-                       ("", "", ""))
+        cursor.execute("INSERT INTO candidates (name,email,experience) VALUES ('','','')")
         conn.commit()
         candidate_id = cursor.lastrowid
-
-        return {
-            "reply": "Welcome! What is your name?",
-            "stage": 1,
-            "candidate_id": candidate_id
-        }
+        return {"reply": "Welcome! What is your name?",
+                "stage": 1,
+                "candidate_id": candidate_id}
 
     elif stage == 1:
         cursor.execute("UPDATE candidates SET name=? WHERE id=?",
                        (data.message, candidate_id))
         conn.commit()
-
-        return {
-            "reply": "Enter your email.",
-            "stage": 2,
-            "candidate_id": candidate_id
-        }
+        return {"reply": "Enter your email.",
+                "stage": 2,
+                "candidate_id": candidate_id}
 
     elif stage == 2:
         cursor.execute("UPDATE candidates SET email=? WHERE id=?",
                        (data.message, candidate_id))
         conn.commit()
-
-        return {
-            "reply": "Years of experience?",
-            "stage": 3,
-            "candidate_id": candidate_id
-        }
+        return {"reply": "Years of experience?",
+                "stage": 3,
+                "candidate_id": candidate_id}
 
     elif stage == 3:
         cursor.execute("UPDATE candidates SET experience=? WHERE id=?",
                        (data.message, candidate_id))
         conn.commit()
+        return {"reply": "Please upload your CV below.",
+                "stage": 4,
+                "candidate_id": candidate_id}
 
-        return {
-            "reply": "Please upload your CV below.",
-            "stage": 4,
-            "candidate_id": candidate_id
-        }
-
-    return {
-        "reply": "Waiting for CV upload.",
-        "stage": stage,
-        "candidate_id": candidate_id
-    }
+    return {"reply": "Waiting for CV upload.",
+            "stage": stage,
+            "candidate_id": candidate_id}
 
 # ----------------------------
-# UPLOAD CV (NO SESSION)
+# UPLOAD CV
 # ----------------------------
 @app.post("/upload")
-async def upload(
-    file: UploadFile = File(...),
-    candidate_id: int = Form(...)
-):
+async def upload(file: UploadFile = File(...),
+                 candidate_id: int = Form(...)):
 
     filename = str(uuid.uuid4()) + "_" + file.filename
     path = f"uploads/{filename}"
@@ -220,34 +192,73 @@ async def upload(
     return {"message": "CV uploaded successfully!"}
 
 # ----------------------------
-# DOWNLOAD CV
+# ADMIN LOGIN PAGE
 # ----------------------------
-@app.get("/download/{file_path:path}")
-def download(file_path: str):
-    return FileResponse(file_path)
+@app.get("/admin", response_class=HTMLResponse)
+def admin_login():
+    return """
+    <h2>Admin Login</h2>
+    <form method="post">
+        <input type="password" name="password" placeholder="Enter password">
+        <button type="submit">Login</button>
+    </form>
+    """
+
+@app.post("/admin")
+def admin_auth(password: str = Form(...)):
+    if password == ADMIN_PASSWORD:
+        return RedirectResponse("/dashboard", status_code=302)
+    raise HTTPException(status_code=403, detail="Wrong password")
 
 # ----------------------------
-# VIEW CANDIDATES
+# ADMIN DASHBOARD (TABLE UI)
 # ----------------------------
-@app.get("/candidates", response_class=HTMLResponse)
-def candidates():
-    cursor.execute("SELECT name, email, experience, cv_path FROM candidates")
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    cursor.execute("SELECT * FROM candidates")
     rows = cursor.fetchall()
 
-    html = "<h2>Candidate List</h2><table border='1'>"
-    html += "<tr><th>Name</th><th>Email</th><th>Experience</th><th>CV</th></tr>"
+    html = "<h2>Candidate Dashboard</h2><table border='1' cellpadding='10'>"
+    html += "<tr><th>ID</th><th>Name</th><th>Email</th><th>Experience</th><th>CV</th><th>Action</th></tr>"
 
     for r in rows:
-        cv_link = f"<a href='/download/{r[3]}'>Download CV</a>" if r[3] else "Not Uploaded"
+        cv_link = f"<a href='/download/{r[0]}'>Download CV</a>" if r[4] else "Not Uploaded"
+        delete_link = f"<a href='/delete/{r[0]}'>Delete</a>"
+
         html += f"""
         <tr>
         <td>{r[0]}</td>
         <td>{r[1]}</td>
         <td>{r[2]}</td>
+        <td>{r[3]}</td>
         <td>{cv_link}</td>
+        <td>{delete_link}</td>
         </tr>
         """
 
     html += "</table>"
     return html
+
+# ----------------------------
+# DOWNLOAD CV (SAFE)
+# ----------------------------
+@app.get("/download/{candidate_id}")
+def download(candidate_id: int):
+    cursor.execute("SELECT cv_path FROM candidates WHERE id=?",
+                   (candidate_id,))
+    row = cursor.fetchone()
+    if row and row[0]:
+        return FileResponse(row[0])
+    raise HTTPException(status_code=404, detail="CV not found")
+
+# ----------------------------
+# DELETE CANDIDATE
+# ----------------------------
+@app.get("/delete/{candidate_id}")
+def delete(candidate_id: int):
+    cursor.execute("DELETE FROM candidates WHERE id=?",
+                   (candidate_id,))
+    conn.commit()
+    return RedirectResponse("/dashboard", status_code=302)
+
 
