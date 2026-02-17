@@ -124,7 +124,7 @@ def home():
     </script>
 
     <br><br>
-    <a href="/candidates">View Candidates</a>
+
 
     </body>
     </html>
@@ -250,3 +250,4 @@ def candidates():
 
     html += "</table>"
     return html
+
